@@ -13,27 +13,48 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Find and extract project ZIP
+      - name: Find and extract project ZIP (normalize Windows paths)
         id: source
         shell: bash
         run: |
           set -euo pipefail
           ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -iname '*.zip' -print -quit)"
           if [ -z "$ZIP_FILE" ]; then
-            echo "No .zip file found in the repository. Upload NOVA_iOS12_Swift_Project_fixed.zip to the repository root, then rerun this workflow." >&2
+            echo "No project ZIP found in repository root. Upload NOVA_iOS12_Swift_Project_fixed.zip." >&2
             exit 1
           fi
-          mkdir -p "$RUNNER_TEMP/nova-source"
-          ditto -x -k "$ZIP_FILE" "$RUNNER_TEMP/nova-source"
-          PROJECT_FILE="$(find "$RUNNER_TEMP/nova-source" -type d -name 'NOVACalculator.xcodeproj' -print -quit)"
-          if [ -z "$PROJECT_FILE" ]; then
-            echo "ZIP does not contain NOVACalculator.xcodeproj" >&2
-            find "$RUNNER_TEMP/nova-source" -maxdepth 4 -print
+          export ZIP_FILE
+          DEST="$RUNNER_TEMP/nova-source"
+          mkdir -p "$DEST"
+          python3 - <<'PY'
+          import os, zipfile
+          from pathlib import Path, PurePosixPath
+          archive = os.environ["ZIP_FILE"]
+          dest = Path(os.environ["RUNNER_TEMP"]) / "nova-source"
+          with zipfile.ZipFile(archive) as z:
+              for info in z.infolist():
+                  # Some Windows-created ZIPs store backslashes as literal path characters.
+                  name = info.filename.replace("\\", "/")
+                  p = PurePosixPath(name)
+                  if p.is_absolute() or ".." in p.parts:
+                      raise SystemExit(f"Unsafe ZIP path: {info.filename}")
+                  target = dest.joinpath(*p.parts)
+                  if info.is_dir() or name.endswith("/"):
+                      target.mkdir(parents=True, exist_ok=True)
+                  else:
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      with z.open(info) as src, target.open("wb") as out:
+                          out.write(src.read())
+          PY
+          PROJECT_FILE="$(find "$DEST" -type d -name 'NOVACalculator.xcodeproj' -print -quit)/project.pbxproj"
+          if [ ! -f "$PROJECT_FILE" ]; then
+            echo "Could not find NOVACalculator.xcodeproj/project.pbxproj after extraction." >&2
+            find "$DEST" -maxdepth 5 -print
             exit 1
           fi
-          echo "project_dir=$(dirname "$PROJECT_FILE")" >> "$GITHUB_OUTPUT"
-          echo "project_file=$PROJECT_FILE" >> "$GITHUB_OUTPUT"
-          echo "Found project: $PROJECT_FILE"
+          echo "project_dir=$(dirname "$(dirname "$PROJECT_FILE")")" >> "$GITHUB_OUTPUT"
+          echo "project_file=$(dirname "$PROJECT_FILE")" >> "$GITHUB_OUTPUT"
+          echo "Found project file: $PROJECT_FILE"
 
       - name: Show Xcode version
         run: xcodebuild -version
@@ -49,9 +70,8 @@ jobs:
         run: |
           set -euo pipefail
           cd "${{ steps.source.outputs.project_dir }}"
-          PROJECT_NAME="$(basename "${{ steps.source.outputs.project_file }}")"
           xcodebuild \
-            -project "$PROJECT_NAME" \
+            -project NOVACalculator.xcodeproj \
             -scheme NOVACalculator \
             -configuration Release \
             -sdk iphoneos \
