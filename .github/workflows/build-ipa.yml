@@ -1,0 +1,92 @@
+name: Build NOVA iOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-unsigned-ipa:
+    runs-on: macos-14
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Find and extract project ZIP
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -iname '*.zip' -print -quit)"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "No .zip file found in the repository. Upload NOVA_iOS12_Swift_Project_fixed.zip to the repository root, then rerun this workflow." >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/nova-source"
+          ditto -x -k "$ZIP_FILE" "$RUNNER_TEMP/nova-source"
+          PROJECT_FILE="$(find "$RUNNER_TEMP/nova-source" -type d -name 'NOVACalculator.xcodeproj' -print -quit)"
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "ZIP does not contain NOVACalculator.xcodeproj" >&2
+            find "$RUNNER_TEMP/nova-source" -maxdepth 4 -print
+            exit 1
+          fi
+          echo "project_dir=$(dirname "$PROJECT_FILE")" >> "$GITHUB_OUTPUT"
+          echo "project_file=$PROJECT_FILE" >> "$GITHUB_OUTPUT"
+          echo "Found project: $PROJECT_FILE"
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: List project schemes
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -list -project "${{ steps.source.outputs.project_file }}"
+
+      - name: Build iPhone app (unsigned)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.source.outputs.project_dir }}"
+          PROJECT_NAME="$(basename "${{ steps.source.outputs.project_file }}")"
+          xcodebuild \
+            -project "$PROJECT_NAME" \
+            -scheme NOVACalculator \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$RUNNER_TEMP/NOVA-DerivedData" \
+            IPHONEOS_DEPLOYMENT_TARGET=12.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/NOVA-DerivedData/Build/Products/Release-iphoneos/NOVACalculator.app"
+          test -d "$APP_PATH"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/NOVACalculator.app"
+          cd "$RUNNER_TEMP/ipa"
+          /usr/bin/zip -qry "$GITHUB_WORKSPACE/NOVA-unsigned.ipa" Payload
+
+      - name: Upload IPA artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOVA-unsigned-IPA
+          path: NOVA-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NOVA-build-log
+          path: ${{ runner.temp }}/xcodebuild.log
+          if-no-files-found: warn
+          retention-days: 7
